@@ -8,7 +8,7 @@ import sys
 import math
 import os
 
-#  Colors
+#  COLORS
 
 
 BG = (10,   8,  30)
@@ -26,11 +26,15 @@ PIE_COLORS = {"gold": (255, 200, 60), "silver": (
     180, 180, 180), "poison": (180, 60, 200)}
 OBS_COLORS = {"spike": (220, 80, 80), "wall": (100, 100, 120)}
 
+# ═══════════════════════════════════════════
+#  CONSTANTS
+# ═══════════════════════════════════════════
 
 WIDTH, HEIGHT = 900, 600
 FPS = 60
 CELL = 16
 
+SCREEN_SPLASH = "splash"   # first page with START GAME
 SCREEN_LOGIN = "login"
 SCREEN_LOBBY = "lobby"
 SCREEN_CUSTOM = "custom"   # snake customization
@@ -39,12 +43,22 @@ SCREEN_GAME = "game"
 SCREEN_END = "end"
 
 THEMES = {
-    "grid":    {"board_bg": (12, 10, 28),  "line_col": (28, 20, 55),  "label": "Dark Grid"},
-    "dungeon": {"board_bg": (28, 22, 18),  "line_col": (55, 42, 30),  "label": "Dungeon"},
-    "purple":  {"board_bg": (20, 10, 40),  "line_col": (50, 25, 80),  "label": "Purple"},
-    "grass":   {"board_bg": (18, 42, 18),  "line_col": (30, 65, 30),  "label": "Grass"},
+    "stone_gray":  {"tile": "stone_gray.png",  "label": "Stone",       "line": (20, 20, 20)},
+    "brick_red":   {"tile": "brick_red.png",   "label": "Brick",       "line": (15, 10, 10)},
+    "tile_blue":   {"tile": "tile_blue.png",   "label": "Blue Tiles",  "line": (10, 15, 25)},
+    "cobble_dark": {"tile": "cobble_dark.png", "label": "Cobblestone", "line": (10, 10, 10)},
+    "ice_crack":   {"tile": "ice_crack.png",   "label": "Ice",         "line": (20, 30, 35)},
+    "sand_yellow": {"tile": "sand_yellow.png", "label": "Sand",        "line": (30, 25, 10)},
+    "wood_brown":  {"tile": "wood_brown.png",  "label": "Wood",        "line": (20, 12,  8)},
+    "slate_dark":  {"tile": "slate_dark.png",  "label": "Slate",       "line": (12, 12, 12)},
+    "air_marble":  {"tile": "air_marble.png",  "label": "Marble",      "line": (30, 30, 30)},
+    "jungle_rock": {"tile": "jungle_rock.png", "label": "Jungle",      "line": (10, 20, 10)},
 }
 THEME_KEYS = list(THEMES.keys())
+
+_tile_cache:  dict = {}   # theme_key → small tile surface
+_board_cache: dict = {}   # "key_WxH" → pre-built full board surface
+_bg_cache:    dict = {}   # filename → scaled Surface
 
 # Snake color palette
 SNAKE_PALETTE = [
@@ -62,7 +76,9 @@ SNAKE_PALETTE = [
 HAT_OPTIONS = ["none", "crown", "tophat", "halo", "party"]
 
 
-#sounds
+# ═══════════════════════════════════════════
+#  SOUND
+# ═══════════════════════════════════════════
 
 _snd_game_over = None
 _snd_you_win = None
@@ -138,7 +154,10 @@ def reset_end_sound():
     _end_sound_played = False
 
 
-#  Network
+# ═══════════════════════════════════════════
+#  NETWORK
+# ═══════════════════════════════════════════
+
 class Network:
     def __init__(self):
         self.sock = None
@@ -193,7 +212,9 @@ class Network:
                 break
 
 
+# ═══════════════════════════════════════════
 #  UI WIDGETS
+# ═══════════════════════════════════════════
 
 class InputBox:
     def __init__(self, x, y, w, h, placeholder=""):
@@ -213,13 +234,18 @@ class InputBox:
                 if len(self.text) < 32:
                     self.text += event.unicode
 
-    def draw(self, surf):
-        bg = ACCENT if self.active else DARK_GRAY
-        brd = ACCENT if self.active else GRAY
-        pygame.draw.rect(surf, bg, self.rect, border_radius=8)
-        pygame.draw.rect(surf, brd, self.rect, 2, border_radius=8)
+    def draw(self, surf, transparent=False):
+        if not transparent:
+            bg = ACCENT if self.active else DARK_GRAY
+            brd = ACCENT if self.active else GRAY
+            pygame.draw.rect(surf, bg, self.rect, border_radius=8)
+            pygame.draw.rect(surf, brd, self.rect, 2, border_radius=8)
+        else:
+            # Transparent mode — just show a subtle active border
+            if self.active:
+                pygame.draw.rect(surf, WHITE, self.rect, 2, border_radius=4)
         display = self.text or self.placeholder
-        color = WHITE if self.text else GRAY
+        color = WHITE if self.text else (200, 180, 220)
         txt = self.font.render(display, True, color)
         surf.blit(txt, (self.rect.x+12, self.rect.y +
                   self.rect.h//2-txt.get_height()//2))
@@ -240,20 +266,72 @@ def draw_text(surf, text, font, color, x, y, center=False):
     surf.blit(lbl, (x-lbl.get_width()//2 if center else x, y))
 
 
-#  Game render
+# ═══════════════════════════════════════════
+#  GAME RENDERER
+# ═══════════════════════════════════════════
+
+def _load_bg(filename: str) -> pygame.Surface | None:
+    """Load, scale to window size, and cache a background image."""
+    if filename in _bg_cache:
+        return _bg_cache[filename]
+    path = os.path.join("resources", "backgrounds", filename)
+    if os.path.exists(path):
+        try:
+            img = pygame.image.load(path).convert()
+            img = pygame.transform.scale(img, (WIDTH, HEIGHT))
+            _bg_cache[filename] = img
+            return img
+        except Exception as e:
+            print(f"[BG] {e}")
+    _bg_cache[filename] = None
+    return None
+
+
+def _get_tile(theme_key: str):
+    if theme_key in _tile_cache:
+        return _tile_cache[theme_key]
+    fname = THEMES.get(theme_key, {}).get("tile", "")
+    path = os.path.join("resources", "tilesets", fname)
+    surf = None
+    if os.path.exists(path):
+        try:
+            surf = pygame.image.load(path).convert()
+            surf = pygame.transform.scale(surf, (CELL*2, CELL*2))
+        except Exception as e:
+            print(f"[TILE] {e}")
+    _tile_cache[theme_key] = surf
+    return surf
+
+
+def _get_board_surf(theme_key: str, board_w: int, board_h: int):
+    """Pre-build and cache full board surface — single blit per frame."""
+    cache_key = f"{theme_key}_{board_w}_{board_h}"
+    if cache_key in _board_cache:
+        return _board_cache[cache_key]
+    bw, bh = board_w*CELL, board_h*CELL
+    board = pygame.Surface((bw, bh))
+    tile = _get_tile(theme_key)
+    if tile:
+        tw, th = tile.get_size()
+        for tx in range(0, bw, tw):
+            for ty in range(0, bh, th):
+                board.blit(tile, (tx, ty))
+        lc = THEMES.get(theme_key, {}).get("line", (0, 0, 0))
+        for c in range(board_w+1):
+            pygame.draw.line(board, lc, (c*CELL, 0), (c*CELL, bh), 1)
+        for r in range(board_h+1):
+            pygame.draw.line(board, lc, (0, r*CELL), (bw, r*CELL), 1)
+    else:
+        board.fill((20, 15, 35))
+    _board_cache[cache_key] = board
+    return board
+
 
 def draw_board(surf, board_w, board_h, theme):
-    cfg = THEMES.get(theme, THEMES["grid"])
     bx, by = 10, 50
-    bw, bh = board_w*CELL, board_h*CELL
-    pygame.draw.rect(surf, cfg["board_bg"], (bx, by, bw, bh))
-    for c in range(board_w+1):
-        pygame.draw.line(surf, cfg["line_col"],
-                         (bx+c*CELL, by), (bx+c*CELL, by+bh), 1)
-    for r in range(board_h+1):
-        pygame.draw.line(surf, cfg["line_col"],
-                         (bx, by+r*CELL), (bx+bw, by+r*CELL), 1)
-    pygame.draw.rect(surf, ACCENT, (bx, by, bw, bh), 2)
+    board_surf = _get_board_surf(theme, board_w, board_h)
+    surf.blit(board_surf, (bx, by))
+    pygame.draw.rect(surf, ACCENT, (bx, by, board_w*CELL, board_h*CELL), 2)
 
 
 def draw_snake(surf, body, col, dead, hat="none"):
@@ -411,41 +489,65 @@ def draw_game_screen(surf, state, my_name, p1, p2,
     draw_text(surf, "T: chat   M: map", font_sm, GRAY, hx, 548)
 
 
-#  Screens
+# ═══════════════════════════════════════════
+#  SCREENS
+# ═══════════════════════════════════════════
+
+# Cache for background images (loaded once)
+_bg_cache: dict = {}
+
+
+def draw_splash(surf, font_sm, font_med):
+    """First screen — background image + START GAME hover highlight."""
+    bg = _load_bg("firstpage.png")
+    if bg:
+        surf.blit(bg, (0, 0))
+    else:
+        surf.fill(BG)
+        lbl = font_med.render("SNAKE BATTLE", True, ACCENT)
+        surf.blit(lbl, (WIDTH//2 - lbl.get_width()//2, HEIGHT//2 - 40))
+
+    # Hover glow on START GAME button
+    # Image: button at y=1065–1141, x=692–1472 → scaled: x=288, y=483, w=325, h=36
+    mx, my = pygame.mouse.get_pos()
+    btn = pygame.Rect(288, 483, 325, 36)
+    if btn.collidepoint(mx, my):
+        glow = pygame.Surface((btn.w, btn.h), pygame.SRCALPHA)
+        glow.fill((255, 255, 255, 45))
+        surf.blit(glow, btn.topleft)
+
 
 def draw_login(surf, font_sm, font_med, font_lg, inp_host, inp_port, inp_user, error):
-    surf.fill(BG)
-    CX = WIDTH//2
+    """Login screen — background image with inputs overlaid on the purple boxes."""
+    bg = _load_bg("loginpage.png")
+    if bg:
+        surf.blit(bg, (0, 0))
+    else:
+        surf.fill(BG)
 
-    # Pixel snake decoration
-    S = 18
-    segs = [(180, 60), (198, 60), (216, 60), (234, 60), (252, 60),
-            (252, 78), (252, 96), (234, 96), (216, 96), (216, 78)]
-    for i, (sx, sy) in enumerate(segs):
-        pygame.draw.rect(surf, ACCENT if i % 2 == 0 else ACCENT2,
-                         (sx, sy, S-2, S-2), border_radius=4)
-    hx2, hy2 = 216, 78
-    pygame.draw.rect(surf, ACCENT, (hx2, hy2, S-2, S-2), border_radius=5)
-    pygame.draw.circle(surf, BG, (hx2+5, hy2+5), 3)
-    pygame.draw.circle(surf, BG, (hx2+12, hy2+5), 3)
-    pygame.draw.line(surf, ERROR_COL, (hx2+8, hy2-2), (hx2+5, hy2-8), 2)
-    pygame.draw.line(surf, ERROR_COL, (hx2+8, hy2-2), (hx2+11, hy2-8), 2)
+    # Exact positions from pixel scan of loginpage.png scaled to 900x600:
+    #   Server IP  → x=288, y=179, w=325, h=36
+    #   Port       → x=288, y=246, w=325, h=37
+    #   Username   → x=288, y=315, w=325, h=36
+    for box in (inp_host, inp_port, inp_user):
+        box.draw(surf, transparent=True)
 
-    title = font_lg.render("SNAKE BATTLE", True, ACCENT)
-    surf.blit(title, (CX-title.get_width()//2, 80))
-
-    for label, box in [("Server IP", inp_host), ("Port", inp_port), ("Username", inp_user)]:
-        lbl = font_sm.render(label, True, GRAY)
-        surf.blit(lbl, (box.rect.x, box.rect.y-22))
-        box.draw(surf)
-
-    mx, my = pygame.mouse.get_pos()
-    btn = pygame.Rect(300, 460, 300, 48)
-    draw_button(surf, btn, "CONNECT", font_med, hover=btn.collidepoint(mx, my))
-
+    # Error message with dark shadow for readability over image
     if error:
         e = font_sm.render(error, True, ERROR_COL)
-        surf.blit(e, (CX-e.get_width()//2, 526))
+        shadow = font_sm.render(error, True, (0, 0, 0))
+        ex = WIDTH//2 - e.get_width()//2
+        surf.blit(shadow, (ex+1, 430))
+        surf.blit(e,      (ex,   429))
+
+    # Hover glow on CONNECT button
+    # Image: button at y=1062–1142, x=692–1472 → scaled: x=288, y=481, w=325, h=36
+    mx, my = pygame.mouse.get_pos()
+    btn = pygame.Rect(288, 481, 325, 36)
+    if btn.collidepoint(mx, my):
+        glow = pygame.Surface((btn.w, btn.h), pygame.SRCALPHA)
+        glow.fill((255, 255, 255, 45))
+        surf.blit(glow, btn.topleft)
 
 
 def draw_lobby(surf, font_sm, font_med, font_lg,
@@ -488,41 +590,47 @@ def draw_lobby(surf, font_sm, font_med, font_lg,
 
 def draw_map_picker(surf, font_sm, font_med, font_lg, selected_theme):
     surf.fill(BG)
-    CX = WIDTH//2
+    CX = WIDTH // 2
     title = font_lg.render("CHOOSE YOUR MAP", True, ACCENT)
-    surf.blit(title, (CX-title.get_width()//2, 40))
+    surf.blit(title, (CX - title.get_width()//2, 22))
     sub = font_sm.render("Pick a background for the match", True, GRAY)
-    surf.blit(sub, (CX-sub.get_width()//2, 90))
+    surf.blit(sub, (CX - sub.get_width()//2, 68))
 
-    pw, ph = 180, 120
-    sx = CX-(2*(pw+20))//2
-    sy = 130
+    cols = 5
+    pw, ph = 156, 90
+    gap = 10
+    total_w = cols*(pw+gap) - gap
+    sx = CX - total_w//2
+    sy = 96
     mx, my = pygame.mouse.get_pos()
-    for i, (tkey, tcfg) in enumerate(THEMES.items()):
-        ci = i % 2
-        ri = i//2
-        px = sx+ci*(pw+20)
-        py = sy+ri*(ph+50)
-        pygame.draw.rect(surf, tcfg["board_bg"], (px, py, pw, ph))
-        for c in range(0, pw, 16):
-            pygame.draw.line(surf, tcfg["line_col"],
-                             (px+c, py), (px+c, py+ph), 1)
-        for r in range(0, ph, 16):
-            pygame.draw.line(surf, tcfg["line_col"],
-                             (px, py+r), (px+pw, py+r), 1)
-        sel = tkey == selected_theme
-        bc = ACCENT if sel else (ACCENT2 if pygame.Rect(
-            px, py, pw, ph).collidepoint(mx, my) else GRAY)
-        pygame.draw.rect(surf, bc, (px, py, pw, ph), 3 if sel else 1)
-        lbl = font_sm.render((">> " if sel else "") +
-                             tcfg["label"], True, ACCENT if sel else WHITE)
-        surf.blit(lbl, (px+pw//2-lbl.get_width()//2, py+ph+6))
 
-    btn = pygame.Rect(CX-140, 460, 280, 48)
-    draw_button(surf, btn, f"PLAY ON  {THEMES[selected_theme]['label'].upper()}",
+    for i, (tkey, tcfg) in enumerate(THEMES.items()):
+        ci = i % cols
+        ri = i // cols
+        px = sx + ci*(pw+gap)
+        py = sy + ri*(ph+34)
+
+        # Draw real tile preview using cached board surface
+        board_s = _get_board_surf(tkey, pw//CELL + 1, ph//CELL + 1)
+        preview = pygame.transform.scale(board_s, (pw, ph))
+        surf.blit(preview, (px, py))
+
+        sel = tkey == selected_theme
+        hov = pygame.Rect(px, py, pw, ph).collidepoint(mx, my)
+        bc = ACCENT if sel else (ACCENT2 if hov else GRAY)
+        pygame.draw.rect(surf, bc, (px, py, pw, ph), 3 if sel else 1)
+
+        lbl = font_sm.render((">> " if sel else "") + tcfg["label"],
+                             True, ACCENT if sel else WHITE)
+        surf.blit(lbl, (px + pw//2 - lbl.get_width()//2, py + ph + 4))
+
+    btn = pygame.Rect(CX-140, 510, 280, 44)
+    draw_button(surf, btn,
+                f"PLAY ON  {THEMES[selected_theme]['label'].upper()}",
                 font_med, hover=btn.collidepoint(mx, my))
-    hint = font_sm.render("Click a map then press PLAY", True, GRAY)
-    surf.blit(hint, (CX-hint.get_width()//2, 524))
+    hint = font_sm.render(
+        "Click a map then press PLAY  |  ESC: back", True, GRAY)
+    surf.blit(hint, (CX - hint.get_width()//2, 562))
 
 
 def draw_hat(surf, hat, hx, hy, col, size=1.0):
@@ -561,7 +669,7 @@ def draw_custom_screen(surf, font_sm, font_med, font_lg,
     sub = font_sm.render("Choose your color and accessory", True, GRAY)
     surf.blit(sub, (CX-sub.get_width()//2, 90))
 
-    #  Color picker 
+    # ── Color picker ──────────────────────────────────────────────────────
     draw_text(surf, "Snake Color", font_med, GRAY, 100, 180)
     for i, (col, name) in enumerate(SNAKE_PALETTE):
         r = pygame.Rect(100+i*80, 220, 60, 60)
@@ -576,7 +684,7 @@ def draw_custom_screen(surf, font_sm, font_med, font_lg,
         lbl = font_sm.render(name, True, GRAY)
         surf.blit(lbl, (r.centerx-lbl.get_width()//2, r.bottom+4))
 
-    #  Hat picker 
+    # ── Hat picker ────────────────────────────────────────────────────────
     draw_text(surf, "Accessory", font_med, GRAY, 100, 305)
     mx2, my2 = pygame.mouse.get_pos()
     for i, hat in enumerate(HAT_OPTIONS):
@@ -590,7 +698,7 @@ def draw_custom_screen(surf, font_sm, font_med, font_lg,
         surf.blit(lbl, (r.centerx-lbl.get_width() //
                   2, r.centery-lbl.get_height()//2))
 
-    #  Snake preview 
+    # ── Snake preview ─────────────────────────────────────────────────────
     draw_text(surf, "Preview", font_med, GRAY, 650, 180)
     px, py = 720, 310
     dk = tuple(max(0, c-70) for c in my_color)
@@ -611,7 +719,7 @@ def draw_custom_screen(surf, font_sm, font_med, font_lg,
     pygame.draw.line(surf, ERROR_COL, (px, py+14), (px+3, py+17), 1)
     draw_hat(surf, my_hat, px, py, my_color)
 
-    #  Next button 
+    # ── Next button ───────────────────────────────────────────────────────
     btn = pygame.Rect(300, 460, 300, 48)
     draw_button(surf, btn, "NEXT: CHOOSE MAP", font_med,
                 hover=btn.collidepoint(mx2, my2))
@@ -656,7 +764,9 @@ def draw_end(surf, font_sm, font_med, font_lg,
                 hover=btn.collidepoint(mx, my))
 
 
-#  Application
+# ═══════════════════════════════════════════
+#  APPLICATION
+# ═══════════════════════════════════════════
 
 class App:
     def __init__(self):
@@ -672,15 +782,15 @@ class App:
         self.font_lg = pygame.font.SysFont("monospace", 36, bold=True)
 
         self.net = Network()
-        self.screen = SCREEN_LOGIN
+        self.screen = SCREEN_SPLASH
         self.error = ""
         self.my_name = ""
 
-        CX, IW, IH = 300, 300, 46
-        self.inp_host = InputBox(CX, 230, IW, IH, placeholder="e.g. 127.0.0.1")
-        self.inp_port = InputBox(CX, 310, IW, IH, placeholder="e.g. 5000")
-        self.inp_user = InputBox(
-            CX, 390, IW, IH, placeholder="e.g. snake_king")
+        # Input boxes positioned precisely over the purple rectangles in loginpage.png
+        # Coordinates measured from the actual image scaled to 900x600
+        self.inp_host = InputBox(288, 179, 325, 36, placeholder="127.0.0.1")
+        self.inp_port = InputBox(288, 247, 325, 36, placeholder="5000")
+        self.inp_user = InputBox(288, 315, 325, 36, placeholder="snake_king")
         self.inp_host.text = "127.0.0.1"
         self.inp_port.text = "5000"
 
@@ -698,7 +808,7 @@ class App:
         self.chat_input = ""
         self.chat_active = False
         self.tick = 0
-        self.theme = "grid"
+        self.theme = "stone_gray"
         self.end_winner = ""
         self.end_health = {}
         self.end_scores = {}
@@ -719,7 +829,7 @@ class App:
             self._draw()
             pygame.display.flip()
 
-    #  Network 
+    # ── Network ────────────────────────────────────────────────────────────
 
     def _process_network(self):
         for msg in self.net.poll():
@@ -761,13 +871,25 @@ class App:
             elif t == "watch_ok":
                 self.screen = SCREEN_GAME
 
-    #  Events 
+    # ── Events ─────────────────────────────────────────────────────────────
 
     def _handle_event(self, event):
-        {SCREEN_LOGIN: self._ev_login, SCREEN_LOBBY: self._ev_lobby,
+        {SCREEN_SPLASH: self._ev_splash,
+         SCREEN_LOGIN:  self._ev_login,
+         SCREEN_LOBBY:  self._ev_lobby,
          SCREEN_CUSTOM: self._ev_custom,
          SCREEN_MAP: self._ev_map,    SCREEN_GAME: self._ev_game,
          SCREEN_END: self._ev_end}[self.screen](event)
+
+    def _ev_splash(self, event):
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            # START GAME button: x=288, y=483, w=325, h=36
+            btn = pygame.Rect(288, 483, 325, 36)
+            if btn.collidepoint(event.pos):
+                self.screen = SCREEN_LOGIN
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.screen = SCREEN_LOGIN
 
     def _ev_login(self, event):
         for b in (self.inp_host, self.inp_port, self.inp_user):
@@ -775,7 +897,9 @@ class App:
         if event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN:
             self._connect()
         if event.type == pygame.MOUSEBUTTONDOWN:
-            if pygame.Rect(300, 460, 300, 48).collidepoint(event.pos):
+            # CONNECT button: x=288, y=481, w=325, h=36
+            btn = pygame.Rect(288, 481, 325, 36)
+            if btn.collidepoint(event.pos):
                 self._connect()
 
     def _connect(self):
@@ -809,7 +933,7 @@ class App:
     def _ev_custom(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN:
             mx, my = event.pos
-            # Color swatches  8 colors in a row starting at y=220
+            # Color swatches — 8 colors in a row starting at y=220
             for i, (col, _) in enumerate(SNAKE_PALETTE):
                 r = pygame.Rect(100+i*80, 220, 60, 60)
                 if r.collidepoint(mx, my):
@@ -830,19 +954,22 @@ class App:
 
     def _ev_map(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN:
-            CX = WIDTH//2
-            pw, ph = 180, 120
-            sx = CX-(2*(pw+20))//2
-            sy = 130
+            CX = WIDTH // 2
+            cols = 5
+            pw, ph = 156, 90
+            gap = 10
+            sx = CX - (cols*(pw+gap) - gap)//2
+            sy = 96
             for i, tkey in enumerate(THEME_KEYS):
-                px = sx+(i % 2)*(pw+20)
-                py = sy+(i//2)*(ph+50)
+                ci = i % cols
+                ri = i // cols
+                px = sx + ci*(pw+gap)
+                py = sy + ri*(ph+34)
                 if pygame.Rect(px, py, pw, ph).collidepoint(event.pos):
                     self.theme = tkey
-            if pygame.Rect(CX-140, 460, 280, 48).collidepoint(event.pos):
+            if pygame.Rect(CX-140, 510, 280, 44).collidepoint(event.pos):
                 self.net.send(
-                    {"type": "challenge", "target": self.selected_player})
-                self.screen = SCREEN_LOBBY
+                    {"type": "challenge", "target": self.selected_player, "theme": self.theme})
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             self.screen = SCREEN_LOBBY
 
@@ -891,10 +1018,12 @@ class App:
                 self.error = ""
                 reset_end_sound()   # allow sound to play again next game
 
-    # Draw 
+    # ── Draw ───────────────────────────────────────────────────────────────
 
     def _draw(self):
-        if self.screen == SCREEN_LOGIN:
+        if self.screen == SCREEN_SPLASH:
+            draw_splash(self.surf, self.font_sm, self.font_med)
+        elif self.screen == SCREEN_LOGIN:
             draw_login(self.surf, self.font_sm, self.font_med, self.font_lg,
                        self.inp_host, self.inp_port, self.inp_user, self.error)
         elif self.screen == SCREEN_LOBBY:
@@ -926,7 +1055,9 @@ class App:
                      scores=self.end_scores)
 
 
-# entry point
+# ═══════════════════════════════════════════
+#  ENTRY POINT
+# ═══════════════════════════════════════════
 
 if __name__ == "__main__":
     App().run()

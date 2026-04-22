@@ -414,7 +414,7 @@ def main():
     port = int(sys.argv[1])
     srv  = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("", port))
+    srv.bind(("0.0.0.0", port))
     srv.listen()
     print(f"[SERVER] Listening on port {port} ...")
 
