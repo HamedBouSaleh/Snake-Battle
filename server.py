@@ -6,7 +6,7 @@ Client-server architecture over TCP.
 All messages are newline-delimited JSON.
 """
 
-import socket, threading, json, sys, random, time
+import socket, threading, json, sys, random, time, uuid
 
 # ═══════════════════════════════════════════
 #  PROTOCOL  (send / recv)
@@ -87,7 +87,7 @@ class GameState:
         }
         self.next_dir  = {p1:"RIGHT", p2:"LEFT"}
         self.health    = {p1:STARTING_HP, p2:STARTING_HP}
-        self.scores    = {p1:0, p2:0}   # cumulative pie points only
+        self.scores    = {p1:0, p2:0}
         self.pies:      list = []
         self.obstacles: list = []
         self.time_left  = TIME_LIMIT
@@ -95,8 +95,6 @@ class GameState:
 
         for _ in range(MAX_OBS): self._spawn_obstacle()
         for _ in range(MAX_PIES): self._spawn_pie()
-
-    # ── Board helpers ─────────────────────────────────────────────────────
 
     def _occupied(self):
         cells = set()
@@ -126,13 +124,9 @@ class GameState:
             t = random.choice(OBS_TYPES)
             self.obstacles.append({"x":c[0],"y":c[1],"type":t["type"],"hp":t["hp"]})
 
-    # ── Input ─────────────────────────────────────────────────────────────
-
     def set_direction(self, player, direction):
         if direction != OPPOSITE.get(self.snakes[player]["dir"]):
             self.next_dir[player] = direction
-
-    # ── Tick ──────────────────────────────────────────────────────────────
 
     def tick(self):
         self.time_left -= 1
@@ -146,25 +140,19 @@ class GameState:
             dx,dy = DELTA[snake["dir"]]
             nx,ny = snake["body"][0][0]+dx, snake["body"][0][1]+dy
 
-            # Wall
             if nx<0 or nx>=BOARD_W or ny<0 or ny>=BOARD_H:
                 self._hit(pname,-30); self._respawn(pname); continue
-            # Obstacle
             obs = next((o for o in self.obstacles if o["x"]==nx and o["y"]==ny),None)
             if obs:
                 self._hit(pname,obs["hp"]); self._respawn(pname); continue
-            # Self
             if [nx,ny] in snake["body"][1:]:
                 self._hit(pname,-30); self._respawn(pname); continue
-            # Other snake
             opp = self.p2 if pname==self.p1 else self.p1
             if [nx,ny] in self.snakes[opp]["body"]:
                 self._hit(pname,-30); self._respawn(pname); continue
 
-            # Move
             snake["body"].insert(0,[nx,ny])
 
-            # Pie
             pie = next((p for p in self.pies if p["x"]==nx and p["y"]==ny),None)
             if pie:
                 self._hit(pname, pie["hp"])
@@ -174,11 +162,9 @@ class GameState:
                 self.pies.remove(pie)
                 self._spawn_pie()
 
-            # Tail
             if snake["growth"]>0: snake["growth"]-=1
             else: snake["body"].pop()
 
-        # Death check
         for pname in [self.p1,self.p2]:
             if self.health[pname]<=0:
                 self.running=False
@@ -227,12 +213,29 @@ class GameState:
 # ═══════════════════════════════════════════
 
 lock          = threading.Lock()
-clients:  dict = {}   # username → socket
-roles:    dict = {}   # username → "player" | "spectator"
-customs:  dict = {}   # username → {"color": (r,g,b), "hat": str}
-game_active   = False
-game_players: list = []
-current_game  = None
+clients: dict = {}   # username → socket
+customs: dict = {}   # username → {"color": ..., "hat": ...}
+games:   dict = {}   # game_id → {"state": GameState, "players": [p1,p2], "spectators": set()}
+pending: dict = {}   # challenged_username → {"from": challenger_username}
+
+
+# ═══════════════════════════════════════════
+#  HELPERS
+# ═══════════════════════════════════════════
+
+def _in_game(username):
+    """Return game_id if username is an active player, else None. Call under lock."""
+    for gid, g in games.items():
+        if username in g["players"]:
+            return gid
+    return None
+
+def _spectating(username):
+    """Return game_id if username is spectating, else None. Call under lock."""
+    for gid, g in games.items():
+        if username in g["spectators"]:
+            return gid
+    return None
 
 
 # ═══════════════════════════════════════════
@@ -242,12 +245,35 @@ current_game  = None
 def broadcast(data, exclude=None):
     with lock: targets = list(clients.items())
     for username, sock in targets:
-        if username != exclude:
+        if exclude is None or username not in exclude:
             send_msg(sock, data)
 
+def broadcast_game(game_id, data):
+    """Send data only to players and spectators of a specific game."""
+    with lock:
+        g = games.get(game_id)
+        if not g:
+            return
+        recipients = list(g["players"]) + list(g["spectators"])
+        socks = [(u, clients[u]) for u in recipients if u in clients]
+    for _, sock in socks:
+        send_msg(sock, data)
+
 def broadcast_lobby():
-    with lock: players = [u for u,r in roles.items() if r=="player"]
-    broadcast({"type":"lobby","players":players})
+    with lock:
+        in_play    = set()
+        spectating = set()
+        active_list = []
+        for gid, g in games.items():
+            in_play.update(g["players"])
+            spectating.update(g["spectators"])
+            active_list.append({
+                "game_id": gid,
+                "player1": g["players"][0],
+                "player2": g["players"][1],
+            })
+        lobby_players = [u for u in clients if u not in in_play and u not in spectating]
+    broadcast({"type": "lobby", "players": lobby_players, "active_games": active_list})
 
 
 # ═══════════════════════════════════════════
@@ -255,7 +281,6 @@ def broadcast_lobby():
 # ═══════════════════════════════════════════
 
 def handle_client(sock, addr):
-    global game_active, game_players, current_game
     print(f"[+] Connection from {addr}")
     username = None
 
@@ -279,24 +304,14 @@ def handle_client(sock, addr):
             username = name
             with lock:
                 clients[username] = sock
-                role = "spectator" if game_active else "player"
-                roles[username]   = role
-                # Store snake customization (color + hat)
                 customs[username] = {
                     "color": msg.get("color", None),
                     "hat":   msg.get("hat", "none"),
                 }
 
-            send_msg(sock,{"type":"join_ok","username":username,"role":role})
-            print(f"[+] '{username}' joined as {role}")
+            send_msg(sock, {"type":"join_ok","username":username})
+            print(f"[+] '{username}' joined")
             broadcast_lobby()
-
-            # Spectator joining mid-game gets current state immediately
-            if role=="spectator" and current_game:
-                send_msg(sock,{"type":"game_start",
-                               "player1":current_game.p1,"player2":current_game.p2,
-                               "board_w":BOARD_W,"board_h":BOARD_H,"time_limit":TIME_LIMIT})
-                send_msg(sock, current_game.to_state_msg())
             break
 
         # ── Phase 2: main message loop ────────────────────────────────────
@@ -306,26 +321,76 @@ def handle_client(sock, addr):
             mtype = msg.get("type")
 
             if mtype == "challenge":
+                target = msg.get("target","")
                 with lock:
-                    running = game_active
-                    target  = msg.get("target")
-                    t_exist = target in clients
-                    t_role  = roles.get(target)=="player"
-                    c_role  = roles.get(username)=="player"
-                if running:
-                    send_msg(sock,{"type":"error","msg":"A game is already in progress"})
-                elif not t_exist:
-                    send_msg(sock,{"type":"error","msg":"Player not found"})
-                elif not t_role or not c_role:
-                    send_msg(sock,{"type":"error","msg":"Both players must be in the lobby"})
-                elif target==username:
-                    send_msg(sock,{"type":"error","msg":"Cannot challenge yourself"})
+                    t_sock           = clients.get(target)
+                    already_pending  = target in pending
+                    sender_pending   = any(v["from"] == username for v in pending.values())
+                    t_in_game        = _in_game(target) is not None
+                    u_in_game        = _in_game(username) is not None
+
+                if not t_sock:
+                    send_msg(sock, {"type":"error","msg":"Player not found"})
+                elif target == username:
+                    send_msg(sock, {"type":"error","msg":"Cannot challenge yourself"})
+                elif u_in_game:
+                    send_msg(sock, {"type":"error","msg":"You are already in a game"})
+                elif t_in_game:
+                    send_msg(sock, {"type":"error","msg":"That player is currently in a game"})
+                elif already_pending:
+                    send_msg(sock, {"type":"error","msg":"That player already has a pending challenge"})
+                elif sender_pending:
+                    send_msg(sock, {"type":"error","msg":"You already sent a challenge"})
                 else:
-                    start_game(username, target)
+                    with lock:
+                        pending[target] = {"from": username}
+                    send_msg(t_sock, {"type":"challenge_request","from":username})
+                    send_msg(sock,   {"type":"challenge_sent",   "to":target})
+
+            elif mtype == "challenge_accept":
+                with lock:
+                    entry = pending.pop(username, None)
+                if entry:
+                    challenger = entry["from"]
+                    with lock:
+                        c_exists  = challenger in clients
+                        c_in_game = _in_game(challenger) is not None
+                    if c_exists and not c_in_game:
+                        start_game(challenger, username)
+                    else:
+                        send_msg(sock, {"type":"error","msg":"Challenger is no longer available"})
+                else:
+                    send_msg(sock, {"type":"error","msg":"No pending challenge"})
+
+            elif mtype == "challenge_decline":
+                with lock:
+                    entry = pending.pop(username, None)
+                    c_sock = clients.get(entry["from"]) if entry else None
+                if c_sock:
+                    send_msg(c_sock, {"type":"challenge_declined","by":username})
 
             elif mtype == "watch":
-                with lock: roles[username]="spectator"
-                send_msg(sock,{"type":"watch_ok","msg":"You are now spectating"})
+                game_id = msg.get("game_id","")
+                with lock:
+                    g = games.get(game_id)
+                    if g:
+                        g["spectators"].add(username)
+                        gs = g["state"]
+                        p1, p2 = g["players"]
+                        c1 = customs.get(p1, {"color":None,"hat":"none"})
+                        c2 = customs.get(p2, {"color":None,"hat":"none"})
+                if g:
+                    send_msg(sock, {"type":"game_start",
+                                    "game_id":    game_id,
+                                    "player1":    p1,
+                                    "player2":    p2,
+                                    "board_w":    BOARD_W,
+                                    "board_h":    BOARD_H,
+                                    "time_limit": TIME_LIMIT,
+                                    "customs":    {p1: c1, p2: c2}})
+                    send_msg(sock, gs.to_state_msg())
+                else:
+                    send_msg(sock, {"type":"error","msg":"Game not found or already over"})
 
             elif mtype == "update_custom":
                 with lock:
@@ -337,17 +402,20 @@ def handle_client(sock, addr):
             elif mtype == "move":
                 d = msg.get("dir","").upper()
                 if d in ("UP","DOWN","LEFT","RIGHT"):
-                    if current_game and username in current_game.snakes:
-                        current_game.set_direction(username,d)
+                    with lock:
+                        gid = _in_game(username)
+                        gs  = games[gid]["state"] if gid else None
+                    if gs and username in gs.snakes:
+                        gs.set_direction(username, d)
                 else:
                     send_msg(sock,{"type":"error","msg":"Invalid direction"})
 
             elif mtype == "chat":
-                target = msg.get("to")
+                target = msg.get("to","")
                 text   = str(msg.get("msg",""))[:300]
                 with lock:
-                    tsock  = clients.get(target)
-                    ssock  = clients.get(username)
+                    tsock = clients.get(target)
+                    ssock = clients.get(username)
                 if tsock: send_msg(tsock,{"type":"chat","from":username,"msg":text})
                 elif ssock: send_msg(ssock,{"type":"error","msg":"Player not found"})
 
@@ -356,25 +424,58 @@ def handle_client(sock, addr):
 
     finally:
         if username:
+            # Collect all state under lock, then send notifications outside
             with lock:
-                clients.pop(username,None)
-                roles.pop(username,None)
-                customs.pop(username,None)
+                clients.pop(username, None)
+                customs.pop(username, None)
+
+                # Cancel outgoing challenge (username is the challenger)
+                outgoing_targets = [t for t, e in list(pending.items()) if e["from"] == username]
+                for t in outgoing_targets:
+                    pending.pop(t, None)
+                notify_challenged = [(t, clients.get(t)) for t in outgoing_targets]
+
+                # Cancel incoming challenge (username is the challenged)
+                incoming = pending.pop(username, None)
+                notify_challenger = (incoming["from"], clients.get(incoming["from"])) if incoming else None
+
+                # Find if username is a player in a game
+                in_game_id = _in_game(username)
+
+                # Find if username is spectating
+                spec_id = _spectating(username)
+                if spec_id and spec_id in games:
+                    games[spec_id]["spectators"].discard(username)
+
+            # Send cancellation messages outside lock
+            for t, tsock in notify_challenged:
+                if tsock:
+                    send_msg(tsock, {"type":"challenge_cancelled","by":username})
+            if notify_challenger:
+                _, c_sock = notify_challenger
+                if c_sock:
+                    send_msg(c_sock, {"type":"challenge_cancelled","by":username})
+
             print(f"[-] '{username}' disconnected")
             broadcast_lobby()
+
             # Handle mid-game disconnect
-            with lock:
-                in_game = username in game_players
-                gp      = list(game_players)
-            if in_game:
-                if current_game: current_game.running=False
-                opponent = [p for p in gp if p!=username]
-                with lock: game_active=False; game_players.clear()
-                if opponent:
-                    broadcast({"type":"game_over","winner":opponent[0],
-                               "reason":"opponent_disconnected",
-                               "health":current_game.health if current_game else {},
-                               "scores":current_game.scores if current_game else {}})
+            if in_game_id:
+                with lock:
+                    g = games.get(in_game_id)
+                if g:
+                    g["state"].running = False
+                    opponent = [p for p in g["players"] if p != username]
+                    result = {
+                        "type":   "game_over",
+                        "game_id": in_game_id,
+                        "winner":  opponent[0] if opponent else "draw",
+                        "reason":  "opponent_disconnected",
+                        "health":  dict(g["state"].health),
+                        "scores":  dict(g["state"].scores),
+                    }
+                    broadcast_game(in_game_id, result)
+
         sock.close()
 
 
@@ -383,44 +484,63 @@ def handle_client(sock, addr):
 # ═══════════════════════════════════════════
 
 def start_game(player1, player2):
-    global game_active, game_players, current_game
-    with lock:
-        game_active  = True
-        game_players = [player1, player2]
-
-    print(f"[GAME] {player1} vs {player2}")
-    current_game = GameState(player1, player2)
+    game_id = str(uuid.uuid4())
+    gs = GameState(player1, player2)
 
     with lock:
+        games[game_id] = {"state": gs, "players": [player1, player2], "spectators": set()}
         c1 = customs.get(player1, {"color": None, "hat": "none"})
         c2 = customs.get(player2, {"color": None, "hat": "none"})
+        s1 = clients.get(player1)
+        s2 = clients.get(player2)
 
-    broadcast({"type":"game_start","player1":player1,"player2":player2,
-               "board_w":BOARD_W,"board_h":BOARD_H,"time_limit":TIME_LIMIT,
-               "customs":{player1: c1, player2: c2}})
-    broadcast(current_game.to_state_msg())
+    print(f"[GAME] {player1} vs {player2}  id={game_id[:8]}")
 
-    threading.Thread(target=game_loop, args=(current_game,), daemon=True).start()
+    game_msg = {
+        "type":       "game_start",
+        "game_id":    game_id,
+        "player1":    player1,
+        "player2":    player2,
+        "board_w":    BOARD_W,
+        "board_h":    BOARD_H,
+        "time_limit": TIME_LIMIT,
+        "customs":    {player1: c1, player2: c2},
+    }
+    state_msg = gs.to_state_msg()
+    if s1:
+        send_msg(s1, game_msg)
+        send_msg(s1, state_msg)
+    if s2:
+        send_msg(s2, game_msg)
+        send_msg(s2, state_msg)
+
+    broadcast_lobby()
+    threading.Thread(target=game_loop, args=(game_id,), daemon=True).start()
 
 
-def game_loop(game):
-    global game_active, game_players, current_game
-    print("[GAME] Loop started")
+def game_loop(game_id):
+    print(f"[GAME] Loop started for {game_id[:8]}")
 
-    while game.running:
+    with lock:
+        g = games.get(game_id)
+    if not g:
+        return
+    gs = g["state"]
+
+    while gs.running:
         time.sleep(TICK_RATE)
-        result = game.tick()
-        broadcast(game.to_state_msg())
+        result = gs.tick()
+        broadcast_game(game_id, gs.to_state_msg())
         if result:
-            broadcast(result)
-            print(f"[GAME] Over — {result.get('winner')} wins")
+            result["game_id"] = game_id
+            broadcast_game(game_id, result)
+            print(f"[GAME] {game_id[:8]} over — {result.get('winner')} wins")
             break
 
     with lock:
-        game_active  = False
-        game_players = []
-        current_game = None
-    print("[GAME] Back to lobby")
+        games.pop(game_id, None)
+    broadcast_lobby()
+    print(f"[GAME] {game_id[:8]} cleaned up")
 
 
 # ═══════════════════════════════════════════
