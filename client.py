@@ -37,6 +37,7 @@ CELL = 16
 SCREEN_SPLASH = "splash"
 SCREEN_LOGIN = "login"
 SCREEN_LOBBY = "lobby"
+SCREEN_WAIT  = "wait"    # challenger waits for accept before customizing
 SCREEN_CUSTOM = "custom"
 SCREEN_MAP = "map"
 SCREEN_GAME = "game"
@@ -72,7 +73,7 @@ SNAKE_PALETTE = [
     ((0, 210, 210), "Cyan"),
 ]
 
-HAT_OPTIONS = ["none", "crown", "tophat", "halo", "party"]
+HAT_OPTIONS = ["none", "crown", "tophat", "halo", "party", "cowboy"]
 
 
 # ═══════════════════════════════════════════
@@ -715,6 +716,35 @@ def draw_hat(surf, hat, hx, hy, col, size=1.0):
         pygame.draw.polygon(surf, (255, 220, 0), pts, 1)
         for dx, dy, dc in [(-2, -10, (255, 255, 0)), (2, -14, (0, 255, 255)), (0, -7, (255, 100, 0))]:
             pygame.draw.circle(surf, dc, (hx+dx, hy+dy), 2)
+    elif hat == "cowboy":
+        # brim
+        pygame.draw.ellipse(surf, (139, 90, 43), (hx-16, hy-8, 32, 8))
+        pygame.draw.ellipse(surf, (101, 60, 20), (hx-16, hy-8, 32, 8), 1)
+        # crown
+        pygame.draw.rect(surf, (139, 90, 43), (hx-9, hy-20, 18, 13), border_radius=3)
+        pygame.draw.rect(surf, (101, 60, 20), (hx-9, hy-20, 18, 13), 1, border_radius=3)
+        # band
+        pygame.draw.line(surf, (80, 40, 10), (hx-9, hy-9), (hx+9, hy-9), 2)
+
+
+def draw_wait_screen(surf, font_sm, font_med, font_lg, target, tick):
+    """Challenger waits here after sending challenge, before opponent accepts."""
+    surf.fill(BG)
+    CX, CY = WIDTH//2, HEIGHT//2
+
+    title = font_lg.render("CHALLENGE SENT!", True, ACCENT)
+    surf.blit(title, (CX - title.get_width()//2, CY - 120))
+
+    sub = font_med.render(f"Waiting for  {target}  to accept...", True, WHITE)
+    surf.blit(sub, (CX - sub.get_width()//2, CY - 60))
+
+    # Animated dots
+    dots = "." * (1 + (tick // 20) % 3)
+    anim = font_med.render(dots, True, ACCENT)
+    surf.blit(anim, (CX - anim.get_width()//2, CY - 10))
+
+    hint = font_sm.render("ESC to cancel challenge", True, GRAY)
+    surf.blit(hint, (CX - hint.get_width()//2, CY + 60))
 
 
 def draw_custom_screen(surf, font_sm, font_med, font_lg, my_color, my_hat):
@@ -739,10 +769,14 @@ def draw_custom_screen(surf, font_sm, font_med, font_lg, my_color, my_hat):
         lbl = font_sm.render(name, True, GRAY)
         surf.blit(lbl, (r.centerx-lbl.get_width()//2, r.bottom+4))
 
-    draw_text(surf, "Accessory", font_med, GRAY, 100, 305)
+    draw_text(surf, "Accessory", font_med, GRAY, 60, 305)
     mx2, my2 = pygame.mouse.get_pos()
+    hat_btn_w = 120
+    hat_gap   = 10
+    hat_total = len(HAT_OPTIONS) * (hat_btn_w + hat_gap) - hat_gap
+    hat_sx    = CX - hat_total // 2
     for i, hat in enumerate(HAT_OPTIONS):
-        r = pygame.Rect(100+i*130, 340, 120, 44)
+        r = pygame.Rect(hat_sx + i*(hat_btn_w+hat_gap), 340, hat_btn_w, 44)
         sel = hat == my_hat
         hover = r.collidepoint(mx2, my2)
         bg = ACCENT if sel else (HIGHLIGHT if hover else PANEL)
@@ -968,9 +1002,17 @@ class App:
             elif t == "challenge_sent":
                 self.challenge_sent_to = msg.get("to", "")
 
+            elif t == "challenge_accepted":
+                # Opponent accepted — now challenger customizes their snake
+                self.challenge_sent_to = ""
+                if self.screen == SCREEN_WAIT:
+                    self.screen = SCREEN_CUSTOM
+
             elif t == "challenge_declined":
                 self.challenge_sent_to = ""
                 self.error = f"{msg.get('by', '?')} declined your challenge"
+                if self.screen == SCREEN_WAIT:
+                    self.screen = SCREEN_LOBBY
 
             elif t == "challenge_cancelled":
                 by = msg.get("by", "")
@@ -979,6 +1021,8 @@ class App:
                 if by == self.challenge_sent_to:
                     self.challenge_sent_to = ""
                     self.error = f"{by} is no longer available"
+                if self.screen in (SCREEN_WAIT, SCREEN_CUSTOM, SCREEN_MAP):
+                    self.screen = SCREEN_LOBBY
 
             elif t == "chat":
                 self.chat_log.append(
@@ -990,6 +1034,7 @@ class App:
         {SCREEN_SPLASH: self._ev_splash,
          SCREEN_LOGIN:  self._ev_login,
          SCREEN_LOBBY:  self._ev_lobby,
+         SCREEN_WAIT:   self._ev_wait,
          SCREEN_CUSTOM: self._ev_custom,
          SCREEN_MAP:    self._ev_map,
          SCREEN_GAME:   self._ev_game,
@@ -1043,6 +1088,7 @@ class App:
             if accept_r.collidepoint(event.pos):
                 self.net.send({"type": "challenge_accept"})
                 self.incoming_challenge = ""
+                self.screen = SCREEN_CUSTOM   # challenged player now customizes too
             elif decline_r.collidepoint(event.pos):
                 self.net.send({"type": "challenge_decline"})
                 self.incoming_challenge = ""
@@ -1063,7 +1109,16 @@ class App:
                     self.error = ""
             if (self.selected_player
                     and _lobby_challenge_btn().collidepoint(event.pos)):
-                self.screen = SCREEN_CUSTOM
+                self.net.send({"type": "challenge", "target": self.selected_player})
+                self.screen = SCREEN_WAIT
+
+    def _ev_wait(self, event):
+        # ESC cancels the pending challenge and goes back to lobby
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            self.net.send({"type": "challenge_cancel"})
+            self.challenge_sent_to = ""
+            self.selected_player   = None
+            self.screen = SCREEN_LOBBY
 
     def _ev_custom(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN:
@@ -1071,8 +1126,12 @@ class App:
             for i, (col, _) in enumerate(SNAKE_PALETTE):
                 if pygame.Rect(100+i*80, 220, 60, 60).collidepoint(mx, my):
                     self.my_color = col
+            hat_btn_w = 120
+            hat_gap   = 10
+            hat_total = len(HAT_OPTIONS) * (hat_btn_w + hat_gap) - hat_gap
+            hat_sx    = WIDTH//2 - hat_total // 2
             for i, hat in enumerate(HAT_OPTIONS):
-                if pygame.Rect(100+i*130, 340, 120, 44).collidepoint(mx, my):
+                if pygame.Rect(hat_sx + i*(hat_btn_w+hat_gap), 340, hat_btn_w, 44).collidepoint(mx, my):
                     self.my_hat = hat
             if pygame.Rect(300, 460, 300, 48).collidepoint(mx, my):
                 self.net.send({"type": "update_custom",
@@ -1097,8 +1156,8 @@ class App:
                 if pygame.Rect(px, py, pw, ph).collidepoint(event.pos):
                     self.theme = tkey
             if pygame.Rect(CX-140, 510, 280, 44).collidepoint(event.pos):
-                self.net.send(
-                    {"type": "challenge", "target": self.selected_player})
+                self.net.send({"type": "player_ready",
+                               "color": list(self.my_color), "hat": self.my_hat})
                 self.screen = SCREEN_LOBBY
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             self.screen = SCREEN_LOBBY
@@ -1192,6 +1251,10 @@ class App:
                        active_games=self.active_games,
                        incoming_challenge=self.incoming_challenge,
                        challenge_sent_to=self.challenge_sent_to)
+
+        elif self.screen == SCREEN_WAIT:
+            draw_wait_screen(self.surf, self.font_sm, self.font_med, self.font_lg,
+                             self.selected_player or "opponent", self.tick)
 
         elif self.screen == SCREEN_CUSTOM:
             draw_custom_screen(self.surf, self.font_sm, self.font_med, self.font_lg,

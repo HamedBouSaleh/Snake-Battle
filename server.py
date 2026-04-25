@@ -249,6 +249,7 @@ customs: dict = {}   # username → {"color": ..., "hat": ...}
 # game_id → {"state": GameState, "players": [p1,p2], "spectators": set()}
 games:   dict = {}
 pending: dict = {}   # challenged_username → {"from": challenger_username}
+ready:   dict = {}   # username → {"opponent": str, "color": ..., "hat": ...}
 
 
 # ═══════════════════════════════════════════
@@ -409,16 +410,44 @@ def handle_client(sock, addr):
                 if entry:
                     challenger = entry["from"]
                     with lock:
-                        c_exists = challenger in clients
+                        c_exists  = challenger in clients
                         c_in_game = _in_game(challenger) is not None
+                        c_sock    = clients.get(challenger)
                     if c_exists and not c_in_game:
-                        start_game(challenger, username)
+                        # Tell both players to go customize — record pairing in ready dict
+                        with lock:
+                            ready[username]   = {"opponent": challenger}
+                            ready[challenger] = {"opponent": username}
+                        # Notify challenger their challenge was accepted
+                        if c_sock:
+                            send_msg(c_sock, {"type": "challenge_accepted", "by": username})
                     else:
-                        send_msg(
-                            sock, {"type": "error", "msg": "Challenger is no longer available"})
+                        send_msg(sock, {"type": "error", "msg": "Challenger is no longer available"})
                 else:
-                    send_msg(sock, {"type": "error",
-                             "msg": "No pending challenge"})
+                    send_msg(sock, {"type": "error", "msg": "No pending challenge"})
+
+            elif mtype == "player_ready":
+                # Both players send this after customizing + picking map
+                with lock:
+                    customs[username] = {
+                        "color": msg.get("color", None),
+                        "hat":   msg.get("hat", "none"),
+                    }
+                    entry    = ready.get(username)
+                    opponent = entry["opponent"] if entry else None
+                    opp_ready = opponent and opponent in ready and ready[opponent].get("done")
+                    if entry:
+                        ready[username]["done"] = True
+
+                if not opponent:
+                    send_msg(sock, {"type": "error", "msg": "No active match setup"})
+                elif opp_ready:
+                    # Both ready — clean up and start
+                    with lock:
+                        ready.pop(username, None)
+                        ready.pop(opponent, None)
+                    start_game(opponent, username)
+                # else: wait for opponent to also send player_ready
 
             elif mtype == "challenge_decline":
                 with lock:
@@ -494,6 +523,12 @@ def handle_client(sock, addr):
             with lock:
                 clients.pop(username, None)
                 customs.pop(username, None)
+
+                # Clean up ready state
+                ready_entry = ready.pop(username, None)
+                ready_opponent = ready_entry["opponent"] if ready_entry else None
+                if ready_opponent:
+                    ready.pop(ready_opponent, None)
 
                 # Cancel outgoing challenge (username is the challenger)
                 outgoing_targets = [t for t, e in list(
