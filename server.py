@@ -14,11 +14,9 @@ import random
 import time
 import uuid
 
-# ═══════════════════════════════════════════
-#  PROTOCOL  (send / recv)
-# ═══════════════════════════════════════════
 
 
+#protocol
 def send_msg(sock, data: dict):
     try:
         sock.sendall((json.dumps(data) + "\n").encode())
@@ -41,9 +39,7 @@ def recv_msg(sock):
             return None
 
 
-# ═══════════════════════════════════════════
-#  CONSTANTS
-# ═══════════════════════════════════════════
+#define constants
 
 BOARD_W = 40
 BOARD_H = 30
@@ -82,10 +78,8 @@ OPPOSITE = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
 DELTA = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
 
 
-# ═══════════════════════════════════════════
-#  GAME STATE
-# ═══════════════════════════════════════════
 
+# gamestate class
 class GameState:
     def __init__(self, p1: str, p2: str):
         self.p1, self.p2 = p1, p2
@@ -239,10 +233,7 @@ class GameState:
         }
 
 
-# ═══════════════════════════════════════════
-#  SHARED SERVER STATE
-# ═══════════════════════════════════════════
-
+# the state of a shared server
 lock = threading.Lock()
 clients: dict = {}   # username → socket
 customs: dict = {}   # username → {"color": ..., "hat": ...}
@@ -252,10 +243,7 @@ pending: dict = {}   # challenged_username → {"from": challenger_username}
 ready:   dict = {}   # username → {"opponent": str, "color": ..., "hat": ...}
 
 
-# ═══════════════════════════════════════════
-#  HELPERS
-# ═══════════════════════════════════════════
-
+# the helpers
 def _in_game(username):
     """Return game_id if username is an active player, else None. Call under lock."""
     for gid, g in games.items():
@@ -271,10 +259,7 @@ def _spectating(username):
             return gid
     return None
 
-
-# ═══════════════════════════════════════════
-#  BROADCAST HELPERS
-# ═══════════════════════════════════════════
+# the broadcast helpers
 
 def broadcast(data, exclude=None):
     with lock:
@@ -315,16 +300,14 @@ def broadcast_lobby():
               "active_games": active_list})
 
 
-# ═══════════════════════════════════════════
-#  CLIENT HANDLER THREAD
-# ═══════════════════════════════════════════
+# the thread that handles the client
 
 def handle_client(sock, addr):
     print(f"[+] Connection from {addr}")
     username = None
 
     try:
-        # ── Phase 1: join / username ──────────────────────────────────────
+        # Phase 1: join / username 
         while True:
             msg = recv_msg(sock)
             if msg is None:
@@ -361,7 +344,7 @@ def handle_client(sock, addr):
             broadcast_lobby()
             break
 
-        # ── Phase 2: main message loop ────────────────────────────────────
+        #  Phase 2: main message loop 
         while True:
             msg = recv_msg(sock)
             if msg is None:
@@ -414,7 +397,7 @@ def handle_client(sock, addr):
                         c_in_game = _in_game(challenger) is not None
                         c_sock    = clients.get(challenger)
                     if c_exists and not c_in_game:
-                        # Tell both players to go customize — record pairing in ready dict
+                        # Tell both players to go customize and record pairing in ready dict
                         with lock:
                             ready[username]   = {"opponent": challenger}
                             ready[challenger] = {"opponent": username}
@@ -427,7 +410,7 @@ def handle_client(sock, addr):
                     send_msg(sock, {"type": "error", "msg": "No pending challenge"})
 
             elif mtype == "player_ready":
-                # Both players send this after customizing + picking map
+                # Both players are going to send this after customizing + picking map
                 with lock:
                     customs[username] = {
                         "color": msg.get("color", None),
@@ -442,7 +425,7 @@ def handle_client(sock, addr):
                 if not opponent:
                     send_msg(sock, {"type": "error", "msg": "No active match setup"})
                 elif opp_ready:
-                    # Both ready — clean up and start
+                    # Both ready clean up and start
                     with lock:
                         ready.pop(username, None)
                         ready.pop(opponent, None)
@@ -585,9 +568,7 @@ def handle_client(sock, addr):
         sock.close()
 
 
-# ═══════════════════════════════════════════
-#  GAME LIFECYCLE
-# ═══════════════════════════════════════════
+# the lifecycle of th e game
 
 def start_game(player1, player2):
     game_id = str(uuid.uuid4())
@@ -650,10 +631,7 @@ def game_loop(game_id):
     print(f"[GAME] {game_id[:8]} cleaned up")
 
 
-# ═══════════════════════════════════════════
-#  ENTRY POINT
-# ═══════════════════════════════════════════
-
+# the entry point main
 def main():
     if len(sys.argv) != 2:
         print("Usage: python3 server.py <port>")
