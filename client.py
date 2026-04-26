@@ -8,8 +8,7 @@ import sys
 import math
 import os
 
-#  COLORS
-
+#  colors 
 BG = (10,   8,  30)
 PANEL = (30,  20,  70)
 DARK_GRAY = (45,  30,  80)
@@ -26,10 +25,7 @@ PIE_COLORS = {"gold": (255, 200, 60), "silver": (
     180, 180, 180), "poison": (180, 60, 200)}
 OBS_COLORS = {"spike": (220, 80, 80), "wall": (100, 100, 120)}
 
-# ═══════════════════════════════════════════
-#  CONSTANTS
-# ═══════════════════════════════════════════
-
+# constants
 WIDTH, HEIGHT = 900, 600
 FPS = 60
 CELL = 16
@@ -43,7 +39,7 @@ SCREEN_MAP = "map"
 SCREEN_GAME = "game"
 SCREEN_END = "end"
 
-# Your 10 tile-based themes
+# the 10 tile-based themes
 THEMES = {
     "stone_gray":  {"tile": "stone_gray.png",  "label": "Stone",       "line": (20, 20, 20)},
     "brick_red":   {"tile": "brick_red.png",   "label": "Brick",       "line": (15, 10, 10)},
@@ -76,9 +72,8 @@ SNAKE_PALETTE = [
 HAT_OPTIONS = ["none", "crown", "tophat", "halo", "party", "cowboy"]
 
 
-# ═══════════════════════════════════════════
-#  SOUND
-# ═══════════════════════════════════════════
+
+# loading the sounds
 
 _snd_game_over = None
 _snd_you_win = None
@@ -150,9 +145,7 @@ def reset_end_sound():
     _end_sound_played = False
 
 
-# ═══════════════════════════════════════════
-#  NETWORK
-# ═══════════════════════════════════════════
+#networks
 
 class Network:
     def __init__(self):
@@ -208,10 +201,7 @@ class Network:
                 break
 
 
-# ═══════════════════════════════════════════
-#  UI WIDGETS
-# ═══════════════════════════════════════════
-
+# ui widgets
 class InputBox:
     def __init__(self, x, y, w, h, placeholder=""):
         self.rect = pygame.Rect(x, y, w, h)
@@ -261,10 +251,7 @@ def draw_text(surf, text, font, color, x, y, center=False):
     surf.blit(lbl, (x-lbl.get_width()//2 if center else x, y))
 
 
-# ═══════════════════════════════════════════
-#  GAME RENDERER
-# ═══════════════════════════════════════════
-
+#game render
 def _load_bg(filename: str) -> pygame.Surface | None:
     if filename in _bg_cache:
         return _bg_cache[filename]
@@ -480,10 +467,8 @@ def draw_game_screen(surf, state, my_name, p1, p2,
     draw_text(surf, "T: chat   M: map",  font_sm, GRAY, hx, 548)
 
 
-# ═══════════════════════════════════════════
-#  SCREENS
-# ═══════════════════════════════════════════
 
+# screens
 def draw_splash(surf, font_sm, font_med):
     """First screen — background image + START GAME hover highlight."""
     bg = _load_bg("firstpage.png")
@@ -528,7 +513,7 @@ def draw_login(surf, font_sm, font_med, font_lg, inp_host, inp_port, inp_user, e
         surf.blit(glow, btn.topleft)
 
 
-# Lobby layout constants (from his client)
+# Lobby layout constants 
 _L_X = 50
 _L_W = 390
 _R_X = 465
@@ -857,10 +842,7 @@ def draw_end(surf, font_sm, font_med, font_lg,
     return replay_btn, lobby_btn
 
 
-# ═══════════════════════════════════════════
-#  APPLICATION
-# ═══════════════════════════════════════════
-
+# the application
 class App:
     def __init__(self):
         pygame.mixer.pre_init(44100, -16, 2, 512)
@@ -939,7 +921,7 @@ class App:
             self._draw()
             pygame.display.flip()
 
-    # ── Network ────────────────────────────────────────────────────────────
+    # the network 
 
     def _process_network(self):
         for msg in self.net.poll():
@@ -1003,7 +985,7 @@ class App:
                 self.challenge_sent_to = msg.get("to", "")
 
             elif t == "challenge_accepted":
-                # Opponent accepted — now challenger customizes their snake
+                # when the opponent accepts now the challenger can customizes their snake
                 self.challenge_sent_to = ""
                 if self.screen == SCREEN_WAIT:
                     self.screen = SCREEN_CUSTOM
@@ -1028,7 +1010,7 @@ class App:
                 self.chat_log.append(
                     f"{msg.get('from', '?')}: {msg.get('msg', '')}")
 
-    # ── Events ─────────────────────────────────────────────────────────────
+    #  events 
 
     def _handle_event(self, event):
         {SCREEN_SPLASH: self._ev_splash,
@@ -1094,7 +1076,7 @@ class App:
                 self.incoming_challenge = ""
             return
 
-        # WATCH buttons (right column)
+        # Watch buttons (right column)
         for i, gentry in enumerate(self.active_games):
             if _lobby_watch_rect(i).collidepoint(event.pos):
                 self.net.send({"type": "watch", "game_id": gentry["game_id"]})
@@ -1235,7 +1217,7 @@ class App:
                 self.replay_paused = False
                 reset_end_sound()
 
-    # ── Draw ───────────────────────────────────────────────────────────────
+    #  match draw 
 
     def _draw(self):
         if self.screen == SCREEN_SPLASH:
@@ -1307,7 +1289,7 @@ class App:
                          [], self.theme, self.tick,
                          customs=self.customs)
 
-        # Replay HUD — solid bar at the bottom so it never covers the game
+        # Replay HUD solid bar at the bottom so it never covers the game
         bar_h = 44
         bar_y = HEIGHT - bar_h
         pygame.draw.rect(self.surf, (10, 8, 30), (0, bar_y, WIDTH, bar_h))
@@ -1320,10 +1302,6 @@ class App:
         lbl = self.font_sm.render(info, True, ACCENT)
         self.surf.blit(lbl, (WIDTH//2 - lbl.get_width()//2, bar_y + 14))
 
-
-# ═══════════════════════════════════════════
-#  ENTRY POINT
-# ═══════════════════════════════════════════
 
 if __name__ == "__main__":
     App().run()
